@@ -51,7 +51,7 @@ from playwright.sync_api import sync_playwright
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 
 subprocess.run(
-    ['playwright','install','chromium', '--with-deps']
+    ['playwright','install','chromium']
 )
 # --------------------------------------------------------------------------
 # Renderização dos diagramas Mermaid (mesma lógica do script base)
