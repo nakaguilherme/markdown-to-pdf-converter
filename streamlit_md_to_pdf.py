@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import tempfile
 import zlib
+import sys
 from pathlib import Path
 
 import markdown
@@ -51,8 +52,9 @@ from playwright.sync_api import sync_playwright
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 
 subprocess.run(
-    ['playwright','install','chromium']
-)
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=True,
+    )
 # --------------------------------------------------------------------------
 # Renderização dos diagramas Mermaid (mesma lógica do script base)
 # --------------------------------------------------------------------------
