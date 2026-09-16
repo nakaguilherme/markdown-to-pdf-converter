@@ -1,7 +1,7 @@
 """
 streamlit_md_to_pdf.py
 =======================
-App Streamlit que converte um arquivo Markdown (.md) em PDF.
+App Streamlit que converte Markdown em PDF.
 
 Baseado no script `md_to_pdf.py` fornecido como referência: usa a mesma
 lógica de renderização de diagramas Mermaid (```mermaid ... ```), o mesmo
@@ -9,8 +9,10 @@ CSS de formatação de tabelas/código, e o Chromium headless via Playwright
 para gerar o PDF final (sem precisar de GTK/Pango/Cairo).
 
 Adições em relação ao script original:
-- Interface web (Streamlit) para upload do .md e dos assets (imagens)
-  referenciados nele, com botão de download do PDF gerado.
+- Interface web (Streamlit) com DUAS formas de entrada:
+    1) Upload de um arquivo .md pronto (+ assets/imagens referenciados nele).
+    2) Editor de texto para ESCREVER o Markdown diretamente na página e
+       convertê-lo para PDF, sem precisar subir um arquivo.
 - Suporte a fórmulas LaTeX (via MathJax, renderizado dentro do próprio
   Chromium antes de gerar o PDF).
 - Suporte a tags HTML de estilização usadas dentro do Markdown, como
@@ -37,7 +39,6 @@ e marque a opção "Renderizar Mermaid localmente" na interface.
 import base64
 import json
 import re
-import shutil
 import subprocess
 import tempfile
 import zlib
@@ -52,9 +53,10 @@ from playwright.sync_api import sync_playwright
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 
 subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=True,
-    )
+    [sys.executable, "-m", "playwright", "install", "chromium"],
+    check=True,
+)
+
 # --------------------------------------------------------------------------
 # Renderização dos diagramas Mermaid (mesma lógica do script base)
 # --------------------------------------------------------------------------
@@ -268,7 +270,8 @@ window.MathJax = {
 
 def converter_para_pdf(md_texto: str, pasta_trabalho: Path, usar_local_mermaid: bool) -> Path:
     """Recebe o texto do markdown e a pasta de trabalho (onde os assets/imagens
-    enviados pelo usuário já foram salvos) e devolve o caminho do PDF gerado."""
+    enviados pelo usuário já foram salvos, se houver) e devolve o caminho do
+    PDF gerado."""
 
     pasta_imagens = pasta_trabalho / "mermaid_assets"
     md_texto = substituir_diagramas_mermaid(md_texto, pasta_imagens, usar_local_mermaid)
@@ -335,6 +338,36 @@ def converter_para_pdf(md_texto: str, pasta_trabalho: Path, usar_local_mermaid: 
     return pdf_path
 
 
+def gerar_pdf_e_mostrar_download(md_texto: str, nome_saida: str, usar_local_mermaid: bool,
+                                  assets_enviados=None):
+    """Função auxiliar comum às duas abas: roda a conversão dentro de um
+    diretório temporário, salva os assets (se houver) e exibe o botão de
+    download do PDF resultante."""
+    with st.spinner("Convertendo... isso pode levar alguns segundos."):
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                pasta_trabalho = Path(tmp_dir)
+
+                if assets_enviados:
+                    for asset in assets_enviados:
+                        destino = pasta_trabalho / asset.name
+                        destino.write_bytes(asset.getvalue())
+
+                pdf_path = converter_para_pdf(md_texto, pasta_trabalho, usar_local_mermaid)
+                pdf_bytes = pdf_path.read_bytes()
+
+            st.success("PDF gerado com sucesso!")
+            st.download_button(
+                "⬇️ Baixar PDF",
+                data=pdf_bytes,
+                file_name=nome_saida if nome_saida.endswith(".pdf") else f"{nome_saida}.pdf",
+                mime="application/pdf",
+                key=f"download_{nome_saida}",
+            )
+        except Exception as e:
+            st.error(f"Erro ao converter o arquivo: {e}")
+
+
 # --------------------------------------------------------------------------
 # Interface Streamlit
 # --------------------------------------------------------------------------
@@ -344,69 +377,131 @@ def main():
 
     st.title("📄 Conversor de Markdown para PDF")
     st.write(
-        "Envie um arquivo **.md** e receba de volta o mesmo documento em **PDF**, "
-        "com suporte a diagramas Mermaid, tabelas, imagens, fórmulas em LaTeX "
-        "(`$...$` e `$$...$$`) e tags HTML de estilização como `<center>`, "
-        "`<big>` e `<small>`."
+        "Envie um arquivo **.md** pronto ou **escreva o Markdown diretamente** "
+        "aqui na página, e receba de volta um **PDF**, com suporte a diagramas "
+        "Mermaid, tabelas, imagens, fórmulas em LaTeX (`$...$` e `$$...$$`) e "
+        "tags HTML de estilização como `<center>`, `<big>` e `<small>`."
     )
 
-    uploaded_md = st.file_uploader("Arquivo Markdown (.md)", type=["md", "markdown"])
+    aba_upload, aba_editor = st.tabs(["📤 Enviar arquivo .md", "✏️ Escrever Markdown"])
 
-    with st.expander("Assets/imagens referenciados no markdown (opcional)"):
+    # ------------------------------------------------------------------
+    # Aba 1: fluxo original — upload de um arquivo .md pronto
+    # ------------------------------------------------------------------
+    with aba_upload:
+        uploaded_md = st.file_uploader(
+            "Arquivo Markdown (.md)", type=["md", "markdown"], key="upload_md"
+        )
+
+        with st.expander("Assets/imagens referenciados no markdown (opcional)"):
+            st.caption(
+                "Se o seu .md referencia imagens locais (ex.: `![](foto.png)`), envie "
+                "esses arquivos aqui para que sejam incluídos no PDF."
+            )
+            uploaded_assets = st.file_uploader(
+                "Imagens",
+                type=["png", "jpg", "jpeg", "gif", "svg", "webp"],
+                accept_multiple_files=True,
+                key="upload_assets",
+            )
+
+        usar_local_mermaid_upload = st.checkbox(
+            "Renderizar Mermaid localmente (mmdc)",
+            value=False,
+            help=(
+                "Requer o mermaid-cli instalado (npm install -g @mermaid-js/mermaid-cli). "
+                "Se desmarcado, os diagramas são renderizados pelo serviço público "
+                "mermaid.ink (precisa de internet)."
+            ),
+            key="mermaid_upload",
+        )
+
+        nome_base = Path(uploaded_md.name).stem if uploaded_md else "documento"
+        nome_saida_upload = st.text_input(
+            "Nome do arquivo de saída", value=f"{nome_base}.pdf", key="nome_saida_upload"
+        )
+
+        converter_clicado = st.button(
+            "Converter para PDF",
+            type="primary",
+            disabled=uploaded_md is None,
+            key="converter_upload",
+        )
+
+        if converter_clicado and uploaded_md is not None:
+            md_texto = uploaded_md.getvalue().decode("utf-8")
+            gerar_pdf_e_mostrar_download(
+                md_texto, nome_saida_upload, usar_local_mermaid_upload, uploaded_assets
+            )
+
+    # ------------------------------------------------------------------
+    # Aba 2: novo fluxo — escrever o Markdown direto na página
+    # ------------------------------------------------------------------
+    with aba_editor:
         st.caption(
-            "Se o seu .md referencia imagens locais (ex.: `![](foto.png)`), envie "
-            "esses arquivos aqui para que sejam incluídos no PDF."
-        )
-        uploaded_assets = st.file_uploader(
-            "Imagens",
-            type=["png", "jpg", "jpeg", "gif", "svg", "webp"],
-            accept_multiple_files=True,
+            "Digite ou cole seu Markdown abaixo. Blocos ```mermaid``` viram "
+            "diagramas, tabelas e código são formatados, e fórmulas entre "
+            "`$...$` / `$$...$$` são renderizadas como LaTeX."
         )
 
-    usar_local_mermaid = st.checkbox(
-        "Renderizar Mermaid localmente (mmdc)",
-        value=False,
-        help=(
-            "Requer o mermaid-cli instalado (npm install -g @mermaid-js/mermaid-cli). "
-            "Se desmarcado, os diagramas são renderizados pelo serviço público "
-            "mermaid.ink (precisa de internet)."
-        ),
-    )
+        texto_padrao = (
+            "# Meu documento\n\n"
+            "Escreva seu **Markdown** aqui e clique em *Converter para PDF*.\n\n"
+            "- Item 1\n"
+            "- Item 2\n\n"
+            "```mermaid\n"
+            "graph TD\n"
+            "    A[Início] --> B[Fim]\n"
+            "```\n"
+        )
 
-    nome_base = Path(uploaded_md.name).stem if uploaded_md else "documento"
-    nome_saida = st.text_input("Nome do arquivo de saída", value=f"{nome_base}.pdf")
+        md_editado = st.text_area(
+            "Editor de Markdown",
+            value=texto_padrao,
+            height=400,
+            key="editor_markdown",
+        )
 
-    converter_clicado = st.button(
-        "Converter para PDF", type="primary", disabled=uploaded_md is None
-    )
+        with st.expander("Assets/imagens referenciadas no texto (opcional)"):
+            st.caption(
+                "Se o seu texto referencia imagens locais (ex.: `![](foto.png)`), envie "
+                "esses arquivos aqui para que sejam incluídos no PDF."
+            )
+            assets_editor = st.file_uploader(
+                "Imagens",
+                type=["png", "jpg", "jpeg", "gif", "svg", "webp"],
+                accept_multiple_files=True,
+                key="editor_assets",
+            )
 
-    if converter_clicado and uploaded_md is not None:
-        with st.spinner("Convertendo... isso pode levar alguns segundos."):
-            try:
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    pasta_trabalho = Path(tmp_dir)
+        col1, col2 = st.columns(2)
+        with col1:
+            usar_local_mermaid_editor = st.checkbox(
+                "Renderizar Mermaid localmente (mmdc)",
+                value=False,
+                help=(
+                    "Requer o mermaid-cli instalado (npm install -g @mermaid-js/mermaid-cli). "
+                    "Se desmarcado, os diagramas são renderizados pelo serviço público "
+                    "mermaid.ink (precisa de internet)."
+                ),
+                key="mermaid_editor",
+            )
+        with col2:
+            nome_saida_editor = st.text_input(
+                "Nome do arquivo de saída", value="documento.pdf", key="nome_saida_editor"
+            )
 
-                    # Salva os assets enviados na pasta de trabalho, para que
-                    # referências relativas de imagem no markdown funcionem.
-                    if uploaded_assets:
-                        for asset in uploaded_assets:
-                            destino = pasta_trabalho / asset.name
-                            destino.write_bytes(asset.getvalue())
+        converter_editor_clicado = st.button(
+            "Converter para PDF",
+            type="primary",
+            disabled=not md_editado.strip(),
+            key="converter_editor",
+        )
 
-                    md_texto = uploaded_md.getvalue().decode("utf-8")
-
-                    pdf_path = converter_para_pdf(md_texto, pasta_trabalho, usar_local_mermaid)
-                    pdf_bytes = pdf_path.read_bytes()
-
-                st.success("PDF gerado com sucesso!")
-                st.download_button(
-                    "⬇️ Baixar PDF",
-                    data=pdf_bytes,
-                    file_name=nome_saida if nome_saida.endswith(".pdf") else f"{nome_saida}.pdf",
-                    mime="application/pdf",
-                )
-            except Exception as e:
-                st.error(f"Erro ao converter o arquivo: {e}")
+        if converter_editor_clicado and md_editado.strip():
+            gerar_pdf_e_mostrar_download(
+                md_editado, nome_saida_editor, usar_local_mermaid_editor, assets_editor
+            )
 
 
 if __name__ == "__main__":
